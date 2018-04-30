@@ -1,0 +1,94 @@
+#!/usr/bin/env node
+
+'use strict';
+const path = require('path');
+const ArgumentParser = require('argparse').ArgumentParser;
+const logicalTree = require('npm-logical-tree');
+const archy = require('archy');
+ 
+const parser = new ArgumentParser({
+  version: '0.0.1',
+  description: 'Render a simple dependency graph based on npm package.json and package-lock.json files',
+  addHelp: true,
+});
+
+parser.addArgument('projectPath', {
+  type: String,
+  help: 'The path to the project you want to parse',
+});
+
+parser.addArgument(['-f', '--find'], {
+  type: String,
+  help: 'Find the paths that include a certain package',
+});
+
+const args = parser.parseArgs();
+
+// Load up the package.json and package-lock.json from the project path
+const pkg = require(path.join(args.projectPath, 'package.json'));
+const pkgLock = require(path.join(args.projectPath, 'package-lock.json'));
+
+// Keep track of the dependencies we've seen already to avoid recursive loops
+const seen = new WeakMap();
+
+// Convert the LogicalTree given to us by npm-logical-tree into a format
+// consumable by archy
+function treeToHierarchy(tree, parent) {
+  const hierarchy = {
+    label: `${tree.name}@${tree.version}`,
+    nodes:[],
+    name: tree.name,
+    version: tree.version,
+    tree: tree,
+    parent: parent
+  };
+
+  // Prevent recursively investigating nodes we've already seen
+  if (!seen.has(tree)) {
+    seen.set(tree, true);
+
+    for (const [_, node] of tree.dependencies) {
+      hierarchy.nodes.push(treeToHierarchy(node, hierarchy));
+    }
+  }
+
+  return hierarchy;
+}
+
+// Filter out node paths that don't ultimately have
+// a package that matches the given filter
+function filterHierarchy(hierarchy, filter) {
+  if (filter.test(hierarchy.name)) {
+    // Zero out descending nodes if direct match
+    hierarchy.nodes = [];
+    return { hierarchy, match: true };
+  }
+
+  const newNodes = [];
+  let match = false;
+  for (const node of hierarchy.nodes) {
+    if (filterHierarchy(node, filter).match) {
+      newNodes.push(node);
+      match = true;
+    }
+  }
+
+  hierarchy.nodes = newNodes;
+  return { hierarchy, match };
+}
+
+let hierarchy = treeToHierarchy(logicalTree(pkg, pkgLock));
+
+// Find only the paths that match the given regex
+if (args.find) {
+  const find = new RegExp(args.find, 'i');
+  const filtered = filterHierarchy(hierarchy, find);
+  if (!filtered.match) {
+    console.log(`/${args.find}/i did not appear in the listed packages`);
+    return;
+  }
+
+  hierarchy = filtered.hierarchy;
+}
+
+console.log(archy(hierarchy));
